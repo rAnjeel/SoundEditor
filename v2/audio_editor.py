@@ -1,6 +1,7 @@
 import wave
 import numpy as np
 import struct
+from anti_distortion import AntiDistortion
 
 class AudioEditor:
     def __init__(self, filename):
@@ -13,6 +14,7 @@ class AudioEditor:
         self.raw_data = None
         self.audio_data = None
         self.load_file()
+        self.anti_distortion = AntiDistortion()
 
     def load_file(self):
         """
@@ -123,6 +125,17 @@ class AudioEditor:
                 
         except Exception as e:
             raise ValueError(f"Erreur lors de la sauvegarde du fichier: {str(e)}")
+
+    def apply_anti_distortion(self, distortion_type='medium'):
+        """
+        Applique l'anti-distorsion à l'audio chargé
+        :param distortion_type: type d'anti-distorsion (soft/medium/hard/limit/brick)
+        """
+        if self.audio_data is None:
+            raise ValueError("Aucun fichier audio n'est chargé")
+
+        self.audio_data = self.anti_distortion.process(self.audio_data, distortion_type)
+        print(f"Anti-distorsion de type '{distortion_type}' appliquée")
 
     def __del__(self):
         """

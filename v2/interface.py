@@ -1,9 +1,12 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox
 from audio_editor import AudioEditor
 import pygame  # Ajout de pygame pour la lecture audio
 import os
 import tempfile
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import numpy as np
 
 class AudioEditorGUI:
     def __init__(self, root):
@@ -86,6 +89,88 @@ class AudioEditorGUI:
         self.save_button.pack(pady=10)
         self.save_button['state'] = 'disabled'
 
+        # Frame pour l'anti-distorsion
+        self.distortion_frame = ttk.LabelFrame(main_frame, text="Anti-distorsion", padding="5")
+        self.distortion_frame.pack(pady=5, fill=tk.X)
+        
+        # Menu déroulant pour les types d'anti-distorsion
+        self.distortion_types = ['soft', 'medium', 'hard', 'limit', 'brick']
+        self.selected_distortion = tk.StringVar(value='medium')
+        self.distortion_combo = ttk.Combobox(self.distortion_frame, 
+                                           textvariable=self.selected_distortion,
+                                           values=self.distortion_types,
+                                           state='readonly',
+                                           width=10)
+        self.distortion_combo.pack(side=tk.LEFT, padx=5)
+        
+        self.distortion_button = ttk.Button(self.distortion_frame, 
+                                          text="Appliquer", 
+                                          command=self.apply_anti_distortion)
+        self.distortion_button.pack(side=tk.LEFT, padx=5)
+
+        # Frame pour le graphique
+        self.plot_frame = ttk.LabelFrame(main_frame, text="Visualisation", padding="5")
+        self.plot_frame.pack(pady=5, fill=tk.BOTH, expand=True)
+        
+        # Création de la figure matplotlib
+        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(8, 4))
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        # Configuration initiale des axes
+        self.ax1.set_title("Signal Original")
+        self.ax2.set_title("Signal Traité")
+        self.fig.tight_layout()
+
+        # Frame pour les indicateurs de niveau
+        self.meters_frame = ttk.LabelFrame(main_frame, text="Niveaux", padding="5")
+        self.meters_frame.pack(pady=5, fill=tk.X)
+        
+        # VU-mètre pour le signal original
+        self.original_meter_label = tk.Label(self.meters_frame, text="Original:")
+        self.original_meter_label.pack(anchor=tk.W)
+        
+        self.original_meter_canvas = tk.Canvas(self.meters_frame, width=300, height=20, bg='black')
+        self.original_meter_canvas.pack(fill=tk.X, padx=5)
+        
+        # VU-mètre pour le signal traité
+        self.processed_meter_label = tk.Label(self.meters_frame, text="Traité:")
+        self.processed_meter_label.pack(anchor=tk.W)
+        
+        self.processed_meter_canvas = tk.Canvas(self.meters_frame, width=300, height=20, bg='black')
+        self.processed_meter_canvas.pack(fill=tk.X, padx=5)
+        
+        # Création des segments des VU-mètres avec plus de paramètres
+        self.vu_meter_config = {
+            'num_segments': 30,
+            'segment_width': 8,
+            'segment_spacing': 2,
+            'warning_threshold': 0.7,  # 70% pour le jaune
+            'critical_threshold': 0.9,  # 90% pour le rouge
+            'update_interval': 50,  # ms
+            'peak_hold_time': 1000,  # ms
+            'colors': {
+                'normal': '#00ff00',    # Vert
+                'warning': '#ffff00',    # Jaune
+                'critical': '#ff0000',   # Rouge
+                'inactive': 'darkgrey',
+                'peak': '#ffffff'        # Blanc pour les pics
+            }
+        }
+        
+        self.original_segments = self.create_vu_segments(self.original_meter_canvas)
+        self.processed_segments = self.create_vu_segments(self.processed_meter_canvas)
+        
+        # Stockage des valeurs de pic
+        self.peak_values = {'original': 0.0, 'processed': 0.0}
+        self.peak_hold_timers = {'original': None, 'processed': None}
+        
+        # Label pour l'indicateur de distorsion avec plus d'informations
+        self.distortion_label = tk.Label(self.meters_frame, 
+                                       text="Niveau: -∞ dB | Pic: -∞ dB", 
+                                       fg='green')
+        self.distortion_label.pack(pady=5)
+
     def on_slider_change(self, value):
         """Met à jour le champ de saisie quand le slider change"""
         self.amplitude_entry.delete(0, tk.END)
@@ -122,8 +207,11 @@ class AudioEditorGUI:
                 
                 # Charger le nouveau fichier
                 self.editor = AudioEditor(filename)
-                self.original_editor = AudioEditor(filename)  # Garder une copie originale
-                self.current_amplitude = 1.0  # Réinitialiser l'amplitude
+                self.original_editor = AudioEditor(filename)
+                self.current_amplitude = 1.0
+                
+                # Mise à jour du graphique
+                self.update_plot()
                 
                 # Réinitialiser l'interface
                 self.amplitude_slider.set(1.0)
@@ -153,10 +241,15 @@ class AudioEditorGUI:
                 pygame.mixer.music.play()
                 self.playing = True
                 self.play_button.config(text="⏸ Pause")
+                
+                # Démarrer les mises à jour des VU-mètres
+                self.update_vu_meters()
+                
             elif self.playing:
                 pygame.mixer.music.pause()
                 self.playing = False
                 self.play_button.config(text="▶ Play")
+                
         except Exception as e:
             messagebox.showerror("Erreur", f"Erreur lors de la lecture: {str(e)}")
 
@@ -165,6 +258,7 @@ class AudioEditorGUI:
             pygame.mixer.music.stop()
             self.playing = False
             self.play_button.config(text="▶ Play")
+            self.update_vu_meters()  # Mise à jour finale des VU-mètres
 
     def apply_changes(self):
         try:
@@ -174,7 +268,6 @@ class AudioEditorGUI:
                 
                 # Calculer le facteur relatif par rapport à l'amplitude actuelle
                 new_amplitude = self.amplitude_slider.get()
-                relative_factor = new_amplitude / self.current_amplitude
                 
                 # Réinitialiser l'éditeur avec les données originales
                 self.editor = AudioEditor(self.original_editor.filename)
@@ -193,6 +286,10 @@ class AudioEditorGUI:
                 temp_fd, self.temp_file = tempfile.mkstemp(suffix='.wav')
                 os.close(temp_fd)
                 self.editor.save(self.temp_file)
+                
+                # Mettre à jour le graphique et les VU-mètres
+                self.update_plot()
+                self.update_vu_meters()
                 
                 messagebox.showinfo("Succès", "Modifications appliquées!")
         except Exception as e:
@@ -234,6 +331,220 @@ class AudioEditorGUI:
         """Nettoyage à la fermeture"""
         self.cleanup_resources()
         pygame.mixer.quit()
+
+    def apply_anti_distortion(self):
+        try:
+            distortion_type = self.selected_distortion.get()
+            self.editor.apply_anti_distortion(distortion_type)
+            
+            # Mettre à jour le graphique après l'application de l'anti-distorsion
+            self.update_plot()
+            
+            messagebox.showinfo("Succès", f"Anti-distorsion '{distortion_type}' appliquée avec succès!")
+        except Exception as e:
+            messagebox.showerror("Erreur", str(e))
+
+    def update_plot(self):
+        """Met à jour les graphiques avec les données audio actuelles"""
+        if self.editor and self.original_editor:
+            # Nettoyer les graphiques
+            self.ax1.clear()
+            self.ax2.clear()
+            
+            # Configurer les titres
+            self.ax1.set_title("Signal Original")
+            self.ax2.set_title("Signal Traité")
+            
+            # S'assurer que les deux signaux ont la même longueur
+            min_length = min(len(self.original_editor.audio_data), len(self.editor.audio_data))
+            
+            # Calculer le pas d'échantillonnage pour avoir environ 1000 points
+            sample_size = min(1000, min_length)
+            step = max(1, min_length // sample_size)
+            
+            # Créer le vecteur temps
+            time = np.arange(min_length // step) * step / self.original_editor.params.framerate
+            
+            # Échantillonner les données avec le même pas
+            original_data = self.original_editor.audio_data[:min_length:step]
+            processed_data = self.editor.audio_data[:min_length:step]
+            
+            # S'assurer que time et les données ont la même longueur
+            plot_length = min(len(time), len(original_data), len(processed_data))
+            time = time[:plot_length]
+            original_data = original_data[:plot_length]
+            processed_data = processed_data[:plot_length]
+            
+            # Tracer les données
+            self.ax1.plot(time, original_data, 'b-', linewidth=0.5)
+            self.ax1.set_xlabel('Temps (s)')
+            self.ax1.set_ylabel('Amplitude')
+            
+            self.ax2.plot(time, processed_data, 'r-', linewidth=0.5)
+            self.ax2.set_xlabel('Temps (s)')
+            self.ax2.set_ylabel('Amplitude')
+            
+            # Ajuster les limites des axes y pour une meilleure visualisation
+            max_amplitude = max(
+                np.abs(original_data).max(),
+                np.abs(processed_data).max()
+            )
+            y_limit = max_amplitude * 1.1  # Ajouter une marge de 10%
+            
+            self.ax1.set_ylim(-y_limit, y_limit)
+            self.ax2.set_ylim(-y_limit, y_limit)
+            
+            # Ajouter une grille
+            self.ax1.grid(True, alpha=0.3)
+            self.ax2.grid(True, alpha=0.3)
+            
+            # Ajuster la mise en page
+            self.fig.tight_layout()
+            
+            # Rafraîchir le canvas
+            self.canvas.draw()
+            
+            # Mettre à jour les VU-mètres
+            self.update_vu_meters()
+            
+            # Programmer la prochaine mise à jour si en lecture
+            if self.playing:
+                self.root.after(50, self.update_vu_meters)
+
+    def create_vu_segments(self, canvas):
+        """Crée les segments du VU-mètre avec une configuration améliorée"""
+        segments = []
+        cfg = self.vu_meter_config
+        
+        for i in range(cfg['num_segments']):
+            x = i * (cfg['segment_width'] + cfg['segment_spacing']) + 5
+            ratio = i / cfg['num_segments']
+            
+            if ratio < cfg['warning_threshold']:
+                color = cfg['colors']['normal']
+            elif ratio < cfg['critical_threshold']:
+                color = cfg['colors']['warning']
+            else:
+                color = cfg['colors']['critical']
+                
+            segment = canvas.create_rectangle(
+                x, 5, 
+                x + cfg['segment_width'], 15,
+                fill=cfg['colors']['inactive'], 
+                outline='grey'
+            )
+            segments.append((segment, color))
+        return segments
+
+    def update_vu_meters(self):
+        """Met à jour les VU-mètres avec gestion améliorée des niveaux"""
+        if self.editor and self.original_editor:
+            try:
+                # Utiliser une fenêtre glissante plus grande pour plus de précision
+                window_size = min(2048, len(self.editor.audio_data))
+                
+                # Calculer les niveaux RMS et les pics
+                original_data = self.original_editor.audio_data[-window_size:]
+                processed_data = self.editor.audio_data[-window_size:]
+                
+                # Normaliser selon le format audio (en tenant compte du type de données)
+                dtype_info = np.iinfo(original_data.dtype)
+                max_value = float(dtype_info.max)
+                
+                # Conversion en float32 pour les calculs
+                original_data = original_data.astype(np.float32) / max_value
+                processed_data = processed_data.astype(np.float32) / max_value
+                
+                # Calculer RMS et pics
+                original_rms = np.sqrt(np.mean(np.square(original_data)))
+                processed_rms = np.sqrt(np.mean(np.square(processed_data)))
+                
+                original_peak = np.max(np.abs(original_data))
+                processed_peak = np.max(np.abs(processed_data))
+                
+                # Mettre à jour les pics avec hold
+                self.update_peak_values('original', original_peak)
+                self.update_peak_values('processed', processed_peak)
+                
+                # Mettre à jour les VU-mètres
+                self.update_meter_segments(self.original_meter_canvas, 
+                                        self.original_segments, 
+                                        original_rms, 
+                                        self.peak_values['original'])
+                
+                self.update_meter_segments(self.processed_meter_canvas, 
+                                         self.processed_segments, 
+                                         processed_rms,
+                                         self.peak_values['processed'])
+                
+                # Mettre à jour le label avec les informations détaillées
+                rms_db = 20 * np.log10(max(processed_rms, 1e-10))
+                peak_db = 20 * np.log10(max(self.peak_values['processed'], 1e-10))
+                
+                if processed_peak > self.vu_meter_config['critical_threshold']:
+                    color = 'red'
+                    status = "DISTORSION"
+                elif processed_peak > self.vu_meter_config['warning_threshold']:
+                    color = '#FFA500'  # Orange
+                    status = "ATTENTION"
+                else:
+                    color = 'green'
+                    status = "OK"
+                
+                self.distortion_label.config(
+                    text=f"{status} | RMS: {rms_db:.1f} dB | Pic: {peak_db:.1f} dB",
+                    fg=color
+                )
+                
+                # Programmer la prochaine mise à jour si en lecture
+                if self.playing:
+                    self.root.after(50, self.update_vu_meters)
+                    
+            except Exception as e:
+                print(f"Erreur dans update_vu_meters: {str(e)}")
+
+    def update_peak_values(self, meter_type, new_peak):
+        """Gère la mise à jour des valeurs de pic avec hold"""
+        if new_peak > self.peak_values[meter_type]:
+            self.peak_values[meter_type] = new_peak
+            
+            # Annuler le timer précédent s'il existe
+            if self.peak_hold_timers[meter_type]:
+                self.root.after_cancel(self.peak_hold_timers[meter_type])
+            
+            # Créer un nouveau timer pour réinitialiser le pic
+            self.peak_hold_timers[meter_type] = self.root.after(
+                self.vu_meter_config['peak_hold_time'],
+                lambda: self.reset_peak(meter_type)
+            )
+
+    def reset_peak(self, meter_type):
+        """Réinitialise la valeur de pic pour un mètre donné"""
+        self.peak_values[meter_type] = 0.0
+        self.peak_hold_timers[meter_type] = None
+
+    def update_meter_segments(self, canvas, segments, level, peak_level):
+        """Met à jour les segments d'un VU-mètre avec affichage des pics"""
+        try:
+            cfg = self.vu_meter_config
+            
+            # Ajuster le niveau pour une meilleure visualisation
+            level = min(1.0, level * 1.5)  # Amplifier légèrement pour une meilleure visibilité
+            peak_level = min(1.0, peak_level * 1.5)
+            
+            active_segments = int(level * len(segments))
+            peak_segment = int(peak_level * len(segments))
+            
+            for i, (segment, color) in enumerate(segments):
+                if i < active_segments:
+                    canvas.itemconfig(segment, fill=color)
+                elif i == peak_segment:
+                    canvas.itemconfig(segment, fill=cfg['colors']['peak'])
+                else:
+                    canvas.itemconfig(segment, fill=cfg['colors']['inactive'])
+                    
+        except Exception as e:
+            print(f"Erreur dans update_meter_segments: {str(e)}")
 
 if __name__ == "__main__":
     root = tk.Tk()
