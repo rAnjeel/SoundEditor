@@ -7,6 +7,7 @@ import tempfile
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
+from noise_reducer import NoiseReducer
 
 class AudioEditorGUI:
     def __init__(self, root):
@@ -71,7 +72,60 @@ class AudioEditorGUI:
         self.apply_button.pack(pady=10)
         self.apply_button['state'] = 'disabled'
 
-        # Boutons de contrôle de lecture
+        # Frame pour la réduction de bruit (déplacé ici)
+        self.noise_frame = ttk.LabelFrame(main_frame, text="Réduction de bruit", padding="5")
+        self.noise_frame.pack(pady=5, fill=tk.X)
+        
+        # Boutons et contrôles de réduction de bruit dans une sous-frame
+        noise_controls_frame = ttk.Frame(self.noise_frame)
+        noise_controls_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Bouton pour capturer le profil de bruit
+        self.capture_noise_button = ttk.Button(
+            noise_controls_frame,
+            text="Capturer bruit",
+            command=self.capture_noise_profile,
+            width=15
+        )
+        self.capture_noise_button.pack(side=tk.LEFT, padx=5)
+        
+        # Frame pour le slider et son label
+        slider_frame = ttk.Frame(noise_controls_frame)
+        slider_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Label pour la force de réduction
+        ttk.Label(slider_frame, text="Force de réduction:").pack(anchor=tk.W)
+        
+        # Slider pour la force de réduction
+        self.reduction_strength = tk.DoubleVar(value=1.0)
+        self.reduction_slider = ttk.Scale(
+            slider_frame,
+            from_=0.0, to=2.0,
+            variable=self.reduction_strength,
+            orient=tk.HORIZONTAL
+        )
+        self.reduction_slider.pack(fill=tk.X, expand=True)
+        
+        # Label pour afficher la valeur
+        self.reduction_label = ttk.Label(noise_controls_frame, text="Force: 1.0")
+        self.reduction_label.pack(side=tk.LEFT, padx=5)
+        
+        # Bouton pour appliquer la réduction
+        self.apply_noise_reduction = ttk.Button(
+            noise_controls_frame,
+            text="Appliquer",
+            command=self.apply_noise_reduction,
+            width=10
+        )
+        self.apply_noise_reduction.pack(side=tk.LEFT, padx=5)
+        
+        # Initialisation du réducteur de bruit
+        self.noise_reducer = NoiseReducer()
+        
+        # Mise à jour du label de force
+        self.reduction_slider.config(command=self.update_reduction_label)
+
+        # Boutons de contrôle de lecture (déplacés après la réduction de bruit)
         playback_frame = tk.Frame(main_frame)
         playback_frame.pack(pady=10)
         
@@ -209,6 +263,9 @@ class AudioEditorGUI:
                 self.editor = AudioEditor(filename)
                 self.original_editor = AudioEditor(filename)
                 self.current_amplitude = 1.0
+                
+                # Réinitialiser le réducteur de bruit
+                self.noise_reducer.reset()
                 
                 # Mise à jour du graphique
                 self.update_plot()
@@ -545,6 +602,65 @@ class AudioEditorGUI:
                     
         except Exception as e:
             print(f"Erreur dans update_meter_segments: {str(e)}")
+
+    def update_reduction_label(self, value):
+        """Met à jour le label de force de réduction"""
+        self.reduction_label.config(text=f"Force: {float(value):.1f}")
+
+    def capture_noise_profile(self):
+        """Capture le profil de bruit à partir d'un fichier WAV"""
+        try:
+            filename = filedialog.askopenfilename(
+                title="Sélectionner un fichier de bruit",
+                filetypes=[("Fichiers WAV", "*.wav")]
+            )
+            if filename:
+                noise_editor = AudioEditor(filename)
+                stats = self.noise_reducer.set_noise_profile(noise_editor.audio_data)
+                
+                # Afficher les statistiques du bruit
+                stats_text = (
+                    f"Profil de bruit capturé !\n"
+                    f"Niveau moyen: {stats['mean_power']:.1f} dB\n"
+                    f"Niveau crête: {stats['peak_power']:.1f} dB\n"
+                    f"Plancher: {stats['spectral_floor']:.1f} dB"
+                )
+                messagebox.showinfo("Statistiques du bruit", stats_text)
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Erreur lors de la capture: {str(e)}")
+
+    def apply_noise_reduction(self):
+        """Applique la réduction de bruit au signal"""
+        try:
+            if self.editor and self.noise_reducer.noise_profile is not None:
+                # Réinitialiser l'éditeur avec les données originales
+                self.editor = AudioEditor(self.original_editor.filename)
+                
+                # Appliquer la réduction de bruit
+                cleaned_signal, stats = self.noise_reducer.process(
+                    self.editor.audio_data,
+                    reduction_strength=self.reduction_strength.get()
+                )
+                
+                # Mettre à jour le signal
+                self.editor.audio_data = cleaned_signal
+                
+                # Mettre à jour l'affichage
+                self.update_plot()
+                self.update_vu_meters()
+                
+                # Afficher les statistiques
+                stats_text = (
+                    f"Réduction de bruit appliquée !\n"
+                    f"Réduction moyenne: {-stats['noise_reduction_db']:.1f} dB\n"
+                    f"Préservation du signal: {stats['signal_preserved']*100:.1f}%"
+                )
+                messagebox.showinfo("Statistiques de réduction", stats_text)
+            else:
+                messagebox.showwarning("Attention", 
+                    "Veuillez d'abord charger un fichier audio et capturer un profil de bruit.")
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Erreur lors de la réduction: {str(e)}")
 
 if __name__ == "__main__":
     root = tk.Tk()
